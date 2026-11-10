@@ -1,1 +1,127 @@
+name: Captura Global OpenSky
 
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opensky-global-capture
+  cancel-in-progress: false
+
+jobs:
+  capturar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Instalar rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configurar acceso a Google Drive
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone version
+
+      - name: Capturar datos de OpenSky
+        env:
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import gzip
+          import requests
+          from datetime import datetime, timezone
+
+          TOKEN_URL = (
+              "https://auth.opensky-network.org/auth/realms/"
+              "opensky-network/protocol/openid-connect/token"
+          )
+
+          API_URL = "https://opensky-network.org/api/states/all"
+
+          print("Solicitando token OAuth2...")
+
+          token_response = requests.post(
+              TOKEN_URL,
+              data={
+                  "grant_type": "client_credentials",
+                  "client_id": os.environ["OPENSKY_CLIENT_ID"],
+                  "client_secret": os.environ["OPENSKY_CLIENT_SECRET"],
+              },
+              timeout=30,
+          )
+
+          token_response.raise_for_status()
+          token = token_response.json()["access_token"]
+
+          print("Consultando OpenSky global...")
+
+          response = requests.get(
+              API_URL,
+              headers={"Authorization": f"Bearer {token}"},
+              timeout=90,
+          )
+
+          response.raise_for_status()
+          data = response.json()
+
+          aircraft = data.get("states") or []
+          now = datetime.now(timezone.utc)
+
+          filename = (
+              "opensky_global_"
+              + now.strftime("%Y%m%d_%H%M%S")
+              + ".json.gz"
+          )
+
+          filepath = os.path.join(
+              os.environ["RUNNER_TEMP"],
+              filename
+          )
+
+          with gzip.open(filepath, "wt", encoding="utf-8") as file:
+              json.dump(data, file, ensure_ascii=False)
+
+          print("CAPTURA COMPLETADA")
+          print("Aeronaves recibidas:", len(aircraft))
+          print("Timestamp OpenSky:", data.get("time"))
+          print("Archivo:", filename)
+
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"CAPTURE_FILE={filepath}\n")
+              env.write(f"CAPTURE_YEAR={now.strftime('%Y')}\n")
+              env.write(f"CAPTURE_MONTH={now.strftime('%m')}\n")
+              env.write(f"CAPTURE_DAY={now.strftime('%d')}\n")
+          PY
+
+      - name: Subir captura a Google Drive
+        run: |
+          rclone copy "$CAPTURE_FILE" \
+            "gdrive:OpenSky-Global/$CAPTURE_YEAR/$CAPTURE_MONTH/$CAPTURE_DAY" \
+            --retries 3 \
+            --low-level-retries 10 \
+            --log-level INFO
+
+          echo "SUBIDA A GOOGLE DRIVE COMPLETADA"
