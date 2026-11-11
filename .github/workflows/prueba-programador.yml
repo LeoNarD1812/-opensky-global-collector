@@ -1,0 +1,15 @@
+name: Prueba del programador
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirmar ejecucion automatica
+        run: |
+          echo "El programador funciona"
+          date -u
